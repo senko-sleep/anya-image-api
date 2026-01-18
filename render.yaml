@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: anya-image-api
+    runtime: node
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3456
