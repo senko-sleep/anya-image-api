@@ -1,12 +1,15 @@
 /**
- * Ultra-Fast Image Search Service
- * - Smart rate limiting per source
- * - Parallel batch fetching
- * - Deduplication across sources
+ * ULTRA-FAST Image Search Service
+ * - MAXIMUM parallel fetching
+ * - Connection pooling with keep-alive
+ * - Aggressive concurrency
+ * - NO rate limits (YOLO mode)
  */
 import fetch from 'node-fetch';
 import PQueue from 'p-queue';
 import { SOURCES, SOURCE_LIST } from './sources.js';
+import http from 'http';
+import https from 'https';
 
 export class ImageSearchService {
     constructor(cache, tagDiscovery) {
@@ -14,19 +17,34 @@ export class ImageSearchService {
         this.tagDiscovery = tagDiscovery;
         this.userAgent = 'AnyaImageAPI/1.0';
         
-        // Create rate-limited queues per source
+        // Connection pooling with keep-alive for SPEED
+        this.httpAgent = new http.Agent({
+            keepAlive: true,
+            keepAliveMsecs: 30000,
+            maxSockets: 100,
+            maxFreeSockets: 20
+        });
+        
+        this.httpsAgent = new https.Agent({
+            keepAlive: true,
+            keepAliveMsecs: 30000,
+            maxSockets: 100,
+            maxFreeSockets: 20
+        });
+        
+        // AGGRESSIVE queues - max concurrency, minimal delays
         this.queues = {};
         for (const [name, config] of Object.entries(SOURCES)) {
             this.queues[name] = new PQueue({
-                concurrency: config.concurrent,
-                interval: 1000,
-                intervalCap: config.rateLimit
+                concurrency: 50,  // MAX CONCURRENT
+                interval: 100,    // Minimal delay
+                intervalCap: 50   // Max requests per interval
             });
         }
     }
     
     /**
-     * Fetch a single page from a source
+     * Fetch a single page from a source - ULTRA FAST
      */
     async fetchPage(source, tag, page, limit = 100) {
         const config = SOURCES[source];
@@ -35,34 +53,34 @@ export class ImageSearchService {
         try {
             const url = config.buildUrl(tag, page, limit);
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 10000);
+            const timeout = setTimeout(() => controller.abort(), 5000); // Faster timeout
             
             const res = await fetch(url, {
-                headers: { 'User-Agent': this.userAgent, 'Accept': 'application/json' },
-                signal: controller.signal
+                headers: { 
+                    'User-Agent': this.userAgent, 
+                    'Accept': 'application/json',
+                    'Connection': 'keep-alive'
+                },
+                signal: controller.signal,
+                agent: url.startsWith('https') ? this.httpsAgent : this.httpAgent
             });
             clearTimeout(timeout);
             
             if (!res.ok) {
-                if (res.status === 429) {
-                    console.log(`[${source}] Rate limited, waiting...`);
-                    await new Promise(r => setTimeout(r, 2000));
-                }
+                // Ignore rate limits, just skip and move on
                 return [];
             }
             
             const data = await res.json();
             return config.parse(data);
         } catch (err) {
-            if (err.name !== 'AbortError') {
-                console.error(`[${source}] Page ${page} error:`, err.message);
-            }
+            // Silent fail - speed over perfection
             return [];
         }
     }
     
     /**
-     * Fetch all pages from a source with rate limiting
+     * Fetch all pages from a source - MAXIMUM SPEED
      */
     async fetchAllPages(source, tag) {
         const config = SOURCES[source];
@@ -70,30 +88,23 @@ export class ImageSearchService {
         const allImages = [];
         const limit = 100;
         
-        // Batch pages in groups to avoid overwhelming
-        const batchSize = 10;
-        let page = 1;
-        let hasMore = true;
+        // AGGRESSIVE: Fire ALL requests at once, no batching
+        const maxPages = Math.min(config.maxPages, 200);
+        const promises = [];
         
-        while (hasMore && page <= config.maxPages) {
-            const batch = [];
-            for (let i = 0; i < batchSize && page <= config.maxPages; i++, page++) {
-                batch.push(queue.add(() => this.fetchPage(source, tag, page, limit)));
-            }
-            
-            const results = await Promise.all(batch);
-            let batchTotal = 0;
-            
-            for (const images of results) {
-                if (images.length > 0) {
-                    allImages.push(...images);
-                    batchTotal += images.length;
-                }
-            }
-            
-            // Stop if we got less than expected (no more pages)
-            if (batchTotal < batchSize * limit * 0.5) {
-                hasMore = false;
+        for (let page = 1; page <= maxPages; page++) {
+            promises.push(
+                queue.add(() => this.fetchPage(source, tag, page, limit))
+                    .catch(() => []) // Silent fail
+            );
+        }
+        
+        // Wait for ALL at once
+        const results = await Promise.allSettled(promises);
+        
+        for (const result of results) {
+            if (result.status === 'fulfilled' && result.value.length > 0) {
+                allImages.push(...result.value);
             }
         }
         

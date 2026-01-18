@@ -116,11 +116,11 @@ export class TagDiscoveryService {
     
     async fetchTags(source, term) {
         const configs = {
-            safebooru: { url: 'https://safebooru.org/index.php', params: { page: 'dapi', s: 'tag', q: 'index', json: '1', name_pattern: `${term}%`, limit: 30 } },
-            danbooru: { url: 'https://danbooru.donmai.us/tags.json', params: { 'search[name_matches]': `${term}*`, 'search[category]': '4', limit: 30 } },
-            gelbooru: { url: 'https://gelbooru.com/index.php', params: { page: 'dapi', s: 'tag', q: 'index', json: '1', name_pattern: `${term}%`, limit: 30 } },
-            yandere: { url: 'https://yande.re/tag.json', params: { name: `${term}*`, limit: 30 } },
-            konachan: { url: 'https://konachan.net/tag.json', params: { name: `${term}*`, limit: 30 } }
+            safebooru: { url: 'https://safebooru.org/index.php', params: { page: 'dapi', s: 'tag', q: 'index', json: '1', name_pattern: `${term}%`, limit: 100 } },
+            danbooru: { url: 'https://danbooru.donmai.us/tags.json', params: { 'search[name_matches]': `${term}*`, 'search[category]': '4', limit: 100 } },
+            gelbooru: { url: 'https://gelbooru.com/index.php', params: { page: 'dapi', s: 'tag', q: 'index', json: '1', name_pattern: `${term}%`, limit: 100 } },
+            yandere: { url: 'https://yande.re/tag.json', params: { name: `${term}*`, limit: 100 } },
+            konachan: { url: 'https://konachan.net/tag.json', params: { name: `${term}*`, limit: 100 } }
         };
         
         const cfg = configs[source];
@@ -130,9 +130,15 @@ export class TagDiscoveryService {
             const url = new URL(cfg.url);
             Object.entries(cfg.params).forEach(([k, v]) => url.searchParams.set(k, v));
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 5000);
+            const timeout = setTimeout(() => controller.abort(), 3000); // Faster timeout
             
-            const res = await fetch(url, { headers: { 'User-Agent': this.userAgent }, signal: controller.signal });
+            const res = await fetch(url, { 
+                headers: { 
+                    'User-Agent': this.userAgent,
+                    'Connection': 'keep-alive'
+                }, 
+                signal: controller.signal 
+            });
             clearTimeout(timeout);
             
             if (!res.ok) return [];

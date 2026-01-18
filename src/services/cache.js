@@ -9,19 +9,21 @@ import { LRUCache } from 'lru-cache';
 
 export class CacheService {
     constructor() {
-        // Main image cache - stores search results
+        // Main image cache - AGGRESSIVE caching
         this.imageCache = new LRUCache({
-            max: 500,                    // Max 500 character searches
-            ttl: 1000 * 60 * 60 * 2,    // 2 hour TTL
+            max: 2000,                   // 4x more cache entries
+            ttl: 1000 * 60 * 60 * 6,    // 6 hour TTL
             updateAgeOnGet: true,
-            allowStale: false
+            allowStale: true,            // Serve stale if needed
+            ttlAutopurge: false          // Don't auto-purge for speed
         });
         
-        // Tag cache - stores discovered tags per source
+        // Tag cache - LONG-LIVED
         this.tagCache = new LRUCache({
-            max: 1000,
-            ttl: 1000 * 60 * 60 * 24,   // 24 hour TTL for tags
-            updateAgeOnGet: true
+            max: 5000,                   // 5x more tag entries
+            ttl: 1000 * 60 * 60 * 48,   // 48 hour TTL
+            updateAgeOnGet: true,
+            allowStale: true
         });
         
         // Stats
