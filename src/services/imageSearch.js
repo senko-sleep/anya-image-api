@@ -54,7 +54,7 @@ export class ImageSearchService {
     }
     
     /**
-     * Fetch all pages from a source - MASS PRODUCTION MODE
+     * Fetch all pages from a source - SMART MASS PRODUCTION
      */
     async fetchAllPages(source, tag) {
         const config = SOURCES[source];
@@ -62,22 +62,36 @@ export class ImageSearchService {
         const allImages = [];
         const limit = 100;
         
-        // MASS PRODUCTION: Fetch ALL pages at once, no batching
-        const allTasks = [];
-        for (let page = 1; page <= config.maxPages; page++) {
-            allTasks.push(queue.add(() => this.fetchPage(source, tag, page, limit)));
-        }
+        // SMART: Fetch in aggressive waves, stop when pages are empty
+        const waveSize = 20; // Fetch 20 pages at a time
+        let page = 1;
+        let consecutiveEmpty = 0;
         
-        // Execute ALL pages simultaneously
-        const results = await Promise.all(allTasks);
-        
-        for (const images of results) {
-            if (images && images.length > 0) {
-                allImages.push(...images);
+        while (page <= config.maxPages && consecutiveEmpty < 3) {
+            const wave = [];
+            for (let i = 0; i < waveSize && page <= config.maxPages; i++, page++) {
+                wave.push(queue.add(() => this.fetchPage(source, tag, page, limit)));
+            }
+            
+            const results = await Promise.all(wave);
+            let waveHadResults = false;
+            
+            for (const images of results) {
+                if (images && images.length > 0) {
+                    allImages.push(...images);
+                    waveHadResults = true;
+                }
+            }
+            
+            // Stop if 3 consecutive waves are empty
+            if (!waveHadResults) {
+                consecutiveEmpty++;
+            } else {
+                consecutiveEmpty = 0;
             }
         }
         
-        console.log(`[${source}] Fetched ${allImages.length} images`);
+        console.log(`[${source}] Fetched ${allImages.length} images (${page-1} pages checked)`);
         return allImages;
     }
     
