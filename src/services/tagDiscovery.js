@@ -59,11 +59,11 @@ export class TagDiscoveryService {
     
     async fetchTags(source, term) {
         const configs = {
-            safebooru: { url: 'https://safebooru.org/index.php', params: { page: 'dapi', s: 'tag', q: 'index', json: '1', name_pattern: `${term}%`, limit: 30 } },
-            danbooru: { url: 'https://danbooru.donmai.us/tags.json', params: { 'search[name_matches]': `${term}*`, 'search[category]': '4', limit: 30 } },
-            gelbooru: { url: 'https://gelbooru.com/index.php', params: { page: 'dapi', s: 'tag', q: 'index', json: '1', name_pattern: `${term}%`, limit: 30 } },
-            yandere: { url: 'https://yande.re/tag.json', params: { name: `${term}*`, limit: 30 } },
-            konachan: { url: 'https://konachan.net/tag.json', params: { name: `${term}*`, limit: 30 } }
+            safebooru: { url: 'https://safebooru.org/index.php', params: { page: 'dapi', s: 'tag', q: 'index', json: '1', name_pattern: `${term}%`, limit: 50 } },
+            danbooru: { url: 'https://danbooru.donmai.us/tags.json', params: { 'search[name_matches]': `${term}*`, 'search[category]': '4', limit: 50 } },
+            gelbooru: { url: 'https://gelbooru.com/index.php', params: { page: 'dapi', s: 'tag', q: 'index', json: '1', name_pattern: `${term}%`, limit: 50 } },
+            yandere: { url: 'https://yande.re/tag.json', params: { name: `${term}*`, limit: 50 } },
+            konachan: { url: 'https://konachan.net/tag.json', params: { name: `${term}*`, limit: 50 } }
         };
         
         const cfg = configs[source];
@@ -72,11 +72,9 @@ export class TagDiscoveryService {
         try {
             const url = new URL(cfg.url);
             Object.entries(cfg.params).forEach(([k, v]) => url.searchParams.set(k, v));
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 5000);
             
-            const res = await fetch(url, { headers: { 'User-Agent': this.userAgent }, signal: controller.signal });
-            clearTimeout(timeout);
+            // NO TIMEOUT - mass production mode
+            const res = await fetch(url, { headers: { 'User-Agent': this.userAgent } });
             
             if (!res.ok) return [];
             const data = await res.json();

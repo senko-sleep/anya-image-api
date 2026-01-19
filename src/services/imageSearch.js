@@ -1,7 +1,7 @@
 /**
- * Ultra-Fast Image Search Service
- * - Smart rate limiting per source
- * - Parallel batch fetching
+ * Ultra-Fast Image Search Service - MASS PRODUCTION MODE
+ * - NO timeouts, maximum speed
+ * - Aggressive parallel fetching
  * - Deduplication across sources
  */
 import fetch from 'node-fetch';
@@ -14,19 +14,19 @@ export class ImageSearchService {
         this.tagDiscovery = tagDiscovery;
         this.userAgent = 'AnyaImageAPI/1.0';
         
-        // Create rate-limited queues per source
+        // MASS PRODUCTION: Aggressive queues with higher concurrency
         this.queues = {};
         for (const [name, config] of Object.entries(SOURCES)) {
             this.queues[name] = new PQueue({
-                concurrency: config.concurrent,
+                concurrency: config.concurrent * 3, // 3x concurrency
                 interval: 1000,
-                intervalCap: config.rateLimit
+                intervalCap: config.rateLimit * 2 // 2x rate limit
             });
         }
     }
     
     /**
-     * Fetch a single page from a source
+     * Fetch a single page from a source - NO TIMEOUT
      */
     async fetchPage(source, tag, page, limit = 100) {
         const config = SOURCES[source];
@@ -34,35 +34,27 @@ export class ImageSearchService {
         
         try {
             const url = config.buildUrl(tag, page, limit);
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 10000);
             
+            // NO TIMEOUT - let it run as fast as possible
             const res = await fetch(url, {
-                headers: { 'User-Agent': this.userAgent, 'Accept': 'application/json' },
-                signal: controller.signal
+                headers: { 'User-Agent': this.userAgent, 'Accept': 'application/json' }
             });
-            clearTimeout(timeout);
             
             if (!res.ok) {
-                if (res.status === 429) {
-                    console.log(`[${source}] Rate limited, waiting...`);
-                    await new Promise(r => setTimeout(r, 2000));
-                }
+                // Don't wait on rate limits, just skip
                 return [];
             }
             
             const data = await res.json();
             return config.parse(data);
         } catch (err) {
-            if (err.name !== 'AbortError') {
-                console.error(`[${source}] Page ${page} error:`, err.message);
-            }
+            // Silent fail, keep going
             return [];
         }
     }
     
     /**
-     * Fetch all pages from a source with rate limiting
+     * Fetch all pages from a source - MASS PRODUCTION MODE
      */
     async fetchAllPages(source, tag) {
         const config = SOURCES[source];
@@ -70,30 +62,18 @@ export class ImageSearchService {
         const allImages = [];
         const limit = 100;
         
-        // Batch pages in groups to avoid overwhelming
-        const batchSize = 10;
-        let page = 1;
-        let hasMore = true;
+        // MASS PRODUCTION: Fetch ALL pages at once, no batching
+        const allTasks = [];
+        for (let page = 1; page <= config.maxPages; page++) {
+            allTasks.push(queue.add(() => this.fetchPage(source, tag, page, limit)));
+        }
         
-        while (hasMore && page <= config.maxPages) {
-            const batch = [];
-            for (let i = 0; i < batchSize && page <= config.maxPages; i++, page++) {
-                batch.push(queue.add(() => this.fetchPage(source, tag, page, limit)));
-            }
-            
-            const results = await Promise.all(batch);
-            let batchTotal = 0;
-            
-            for (const images of results) {
-                if (images.length > 0) {
-                    allImages.push(...images);
-                    batchTotal += images.length;
-                }
-            }
-            
-            // Stop if we got less than expected (no more pages)
-            if (batchTotal < batchSize * limit * 0.5) {
-                hasMore = false;
+        // Execute ALL pages simultaneously
+        const results = await Promise.all(allTasks);
+        
+        for (const images of results) {
+            if (images && images.length > 0) {
+                allImages.push(...images);
             }
         }
         
