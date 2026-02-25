@@ -4,8 +4,6 @@
  * - Aggressive parallel fetching
  * - Deduplication across sources
  */
-import fetch from 'node-fetch';
-import PQueue from 'p-queue';
 import { SOURCES, SOURCE_LIST } from './sources.js';
 
 export class ImageSearchService {
@@ -13,16 +11,6 @@ export class ImageSearchService {
         this.cache = cache;
         this.tagDiscovery = tagDiscovery;
         this.userAgent = 'AnyaImageAPI/1.0';
-        
-        // MASS PRODUCTION: Aggressive queues with higher concurrency
-        this.queues = {};
-        for (const [name, config] of Object.entries(SOURCES)) {
-            this.queues[name] = new PQueue({
-                concurrency: config.concurrent * 3, // 3x concurrency
-                interval: 1000,
-                intervalCap: config.rateLimit * 2 // 2x rate limit
-            });
-        }
     }
     
     /**
@@ -34,43 +22,58 @@ export class ImageSearchService {
         
         try {
             const url = config.buildUrl(tag, page, limit);
+            const isHtml = config.responseType === 'html';
             
-            // NO TIMEOUT - let it run as fast as possible
-            const res = await fetch(url, {
-                headers: { 'User-Agent': this.userAgent, 'Accept': 'application/json' }
-            });
+            const headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': isHtml 
+                    ? 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+                    : 'application/json',
+                'Accept-Language': 'en-US,en;q=0.9',
+            };
+            
+            // Add referer for sites that need it
+            if (source === 'wallpapers_com') headers['Referer'] = 'https://wallpapers.com/';
+            if (source === 'zerochan') headers['Referer'] = 'https://www.zerochan.net/';
+            
+            const res = await fetch(url, { headers });
             
             if (!res.ok) {
-                // Don't wait on rate limits, just skip
+                if (res.status !== 429) console.log(`[${source}] HTTP ${res.status} for page ${page}`);
                 return [];
             }
             
-            const data = await res.json();
-            return config.parse(data);
+            if (isHtml) {
+                const html = await res.text();
+                return config.parseHtml(html);
+            } else {
+                const data = await res.json();
+                return config.parse(data);
+            }
         } catch (err) {
-            // Silent fail, keep going
+            console.log(`[${source}] Error page ${page}: ${err.message}`);
             return [];
         }
     }
     
     /**
-     * Fetch all pages from a source - SMART MASS PRODUCTION
+     * Fetch pages from a source with smart batching
      */
     async fetchAllPages(source, tag) {
         const config = SOURCES[source];
-        const queue = this.queues[source];
         const allImages = [];
         const limit = 100;
         
-        // SMART: Fetch in aggressive waves, stop when pages are empty
-        const waveSize = 20; // Fetch 20 pages at a time
+        // Smaller waves to avoid rate limiting — tuned per source type
+        const waveSize = config.concurrent || 3;
+        const maxPages = Math.min(config.maxPages || 10, 15); // Cap at 15 pages per source
         let page = 1;
-        let consecutiveEmpty = 0;
+        let emptyWaves = 0;
         
-        while (page <= config.maxPages && consecutiveEmpty < 3) {
+        while (page <= maxPages && emptyWaves < 2) {
             const wave = [];
-            for (let i = 0; i < waveSize && page <= config.maxPages; i++, page++) {
-                wave.push(queue.add(() => this.fetchPage(source, tag, page, limit)));
+            for (let i = 0; i < waveSize && page <= maxPages; i++, page++) {
+                wave.push(this.fetchPage(source, tag, page, limit));
             }
             
             const results = await Promise.all(wave);
@@ -83,15 +86,16 @@ export class ImageSearchService {
                 }
             }
             
-            // Stop if 3 consecutive waves are empty
             if (!waveHadResults) {
-                consecutiveEmpty++;
+                emptyWaves++;
             } else {
-                consecutiveEmpty = 0;
+                emptyWaves = 0;
             }
         }
         
-        console.log(`[${source}] Fetched ${allImages.length} images (${page-1} pages checked)`);
+        if (allImages.length > 0) {
+            console.log(`[${source}] Fetched ${allImages.length} images (${page-1} pages)`);
+        }
         return allImages;
     }
     

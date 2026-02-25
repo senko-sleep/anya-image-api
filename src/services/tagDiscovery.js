@@ -2,8 +2,6 @@
  * Smart Tag Discovery Service
  * Discovers correct tags for each booru source
  */
-import fetch from 'node-fetch';
-
 export class TagDiscoveryService {
     constructor(cache) {
         this.cache = cache;
@@ -90,13 +88,47 @@ export class TagDiscoveryService {
         if (cached) return cached;
         
         const variations = this.generateVariations(characterName, seriesName);
-        const sources = ['safebooru', 'danbooru', 'gelbooru', 'yandere', 'konachan'];
         const result = {};
         
-        await Promise.all(sources.map(async (src) => {
+        // Step 1: Use Danbooru autocomplete as primary — it has the best tag database
+        // This finds qualified tags like anya_(spy_x_family)
+        let primaryTag = null;
+        const danbooruTags = new Map();
+        
+        for (const variation of variations.slice(0, 3)) {
+            const tags = await this.fetchTags('danbooru', variation);
+            for (const t of tags) {
+                if (!danbooruTags.has(t.name) || danbooruTags.get(t.name).count < t.count) {
+                    danbooruTags.set(t.name, t);
+                }
+            }
+        }
+        
+        // Find best Danbooru tag (prefer qualified tags with series in parens)
+        let bestScore = 0;
+        for (const [name, data] of danbooruTags) {
+            const score = this.scoreTag(name, characterName, seriesName, data.count);
+            if (score > bestScore) {
+                bestScore = score;
+                primaryTag = name;
+            }
+        }
+        
+        if (!primaryTag) primaryTag = this.normalize(characterName);
+        
+        // Step 2: Share the best qualified tag across ALL booru sources
+        const booruSources = ['safebooru', 'danbooru', 'yandere', 'konachan', 'tbib'];
+        for (const src of booruSources) {
+            result[src] = primaryTag;
+        }
+        
+        // Step 3: Source-specific overrides ONLY if they find a qualified tag
+        // (contains parentheses like "anya_(spy_x_family)")
+        // This prevents wrong tags like "anya_forger" from overriding the correct one
+        const sourceSpecific = ['safebooru', 'yandere', 'konachan'];
+        await Promise.all(sourceSpecific.map(async (src) => {
             const allTags = new Map();
-            
-            for (const variation of variations.slice(0, 3)) {
+            for (const variation of variations.slice(0, 2)) {
                 const tags = await this.fetchTags(src, variation);
                 for (const t of tags) {
                     if (!allTags.has(t.name) || allTags.get(t.name).count < t.count) {
@@ -105,20 +137,28 @@ export class TagDiscoveryService {
                 }
             }
             
-            let bestTag = null, bestScore = 0;
+            let srcBest = null, srcBestScore = 0;
             for (const [name, data] of allTags) {
                 const score = this.scoreTag(name, characterName, seriesName, data.count);
-                if (score > bestScore) {
-                    bestScore = score;
-                    bestTag = name;
+                if (score > srcBestScore) {
+                    srcBestScore = score;
+                    srcBest = name;
                 }
             }
             
-            result[src] = bestTag || this.normalize(characterName);
+            // Only override if source found a QUALIFIED tag (with series in parens)
+            // or if Danbooru didn't find a qualified tag either
+            if (srcBest && (srcBest.includes('_(') || !primaryTag.includes('_('))) {
+                if (srcBestScore >= bestScore) {
+                    result[src] = srcBest;
+                }
+            }
         }));
         
-        result.tbib = result.safebooru;
-        result.anime_pictures = result.safebooru;
+        // Step 4: Non-booru sources use character name directly
+        const nameSpaced = characterName;
+        result.wallhaven = nameSpaced;
+        result.wallpapers_com = nameSpaced;
         
         this.cache.setTags(key, result);
         console.log(`[TagDiscovery] Discovered:`, result);

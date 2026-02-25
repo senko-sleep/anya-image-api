@@ -1,115 +1,154 @@
 /**
- * Anya Image API - Ultra-Fast Booru Image Search Proxy
+ * Anya Image API - Cloudflare Worker
  * 
- * Features:
- * - Intelligent rate limiting per source
- * - LRU caching for instant responses
- * - Parallel batch fetching with smart throttling
- * - Automatic tag discovery and normalization
- * - Deduplication across all sources
+ * Ultra-fast booru image search with Cloudflare Images CDN.
+ * Runs on Cloudflare Workers (no Express, no Node.js deps).
  */
 
-import express from 'express';
-import compression from 'compression';
-import cors from 'cors';
 import { ImageSearchService } from './services/imageSearch.js';
 import { CacheService } from './services/cache.js';
 import { TagDiscoveryService } from './services/tagDiscovery.js';
+import { CloudflareImagesService } from './services/cloudflare.js';
 
-const app = express();
-const PORT = process.env.PORT || 10000;
+// Shared service instances (persist across requests in the same isolate)
+let cache, tagDiscovery, imageSearch, cloudflare;
 
-// Services
-const cache = new CacheService();
-const tagDiscovery = new TagDiscoveryService(cache);
-const imageSearch = new ImageSearchService(cache, tagDiscovery);
-
-// Middleware
-app.use(compression());
-app.use(cors());
-app.use(express.json());
-
-// Health check
-app.get('/health', (req, res) => {
-    res.json({ status: 'ok', uptime: process.uptime() });
-});
-
-// Main search endpoint
-app.get('/api/search', async (req, res) => {
-    const startTime = Date.now();
-    
-    try {
-        const { character, series, page = 1, limit = 100 } = req.query;
-        
-        if (!character) {
-            return res.status(400).json({ error: 'Character name required' });
-        }
-        
-        const result = await imageSearch.searchAll(character, series, parseInt(page), parseInt(limit));
-        
-        res.json({
-            success: true,
-            character,
-            series: series || null,
-            page: parseInt(page),
-            limit: parseInt(limit),
-            totalImages: result.totalImages,
-            maxPages: result.maxPages,
-            images: result.images,
-            sources: result.sources,
-            cached: result.cached,
-            timing: Date.now() - startTime
-        });
-    } catch (error) {
-        console.error('[API Error]', error);
-        res.status(500).json({ error: error.message });
+function initServices(env) {
+    if (!cache) {
+        cache = new CacheService();
+        tagDiscovery = new TagDiscoveryService(cache);
+        imageSearch = new ImageSearchService(cache, tagDiscovery);
+        cloudflare = new CloudflareImagesService(env);
     }
-});
+}
 
-// Tag discovery endpoint
-app.get('/api/tags', async (req, res) => {
-    try {
-        const { character, series } = req.query;
-        
-        if (!character) {
-            return res.status(400).json({ error: 'Character name required' });
+function json(data, status = 200) {
+    return new Response(JSON.stringify(data), {
+        status,
+        headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
         }
-        
-        const tags = await tagDiscovery.discoverTags(character, series);
-        res.json({ success: true, tags });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Cache stats
-app.get('/api/stats', (req, res) => {
-    res.json({
-        cache: cache.getStats(),
-        uptime: process.uptime()
     });
-});
+}
 
-// Clear cache
-app.post('/api/cache/clear', (req, res) => {
-    cache.clear();
-    res.json({ success: true, message: 'Cache cleared' });
-});
+export default {
+    async fetch(request, env) {
+        initServices(env);
 
-app.listen(PORT, () => {
-    console.log(`
-╔══════════════════════════════════════════════════════════════╗
-║                    ANYA IMAGE API v1.0                       ║
-║══════════════════════════════════════════════════════════════║
-║  Status: ONLINE                                              ║
-║  Port: ${PORT}                                                 ║
-║  Endpoints:                                                  ║
-║    GET  /api/search?character=X&series=Y&page=1&limit=100    ║
-║    GET  /api/tags?character=X&series=Y                       ║
-║    GET  /api/stats                                           ║
-║    POST /api/cache/clear                                     ║
-╚══════════════════════════════════════════════════════════════╝
-    `);
-});
+        const url = new URL(request.url);
+        const path = url.pathname;
 
-export default app;
+        // CORS preflight
+        if (request.method === 'OPTIONS') {
+            return new Response(null, {
+                headers: {
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Content-Type',
+                }
+            });
+        }
+
+        try {
+            // Health check
+            if (path === '/health') {
+                return json({ status: 'ok' });
+            }
+
+            // Search images
+            if (path === '/api/search' && request.method === 'GET') {
+                const startTime = Date.now();
+                const character = url.searchParams.get('character');
+                const series = url.searchParams.get('series');
+                const page = parseInt(url.searchParams.get('page') || '1');
+                const limit = parseInt(url.searchParams.get('limit') || '100');
+                const cf = url.searchParams.get('cf') === 'true';
+
+                if (!character) {
+                    return json({ error: 'Character name required' }, 400);
+                }
+
+                const result = await imageSearch.searchAll(character, series, page, limit);
+
+                let images = result.images;
+                let cloudflareProcessed = false;
+
+                if (cf && cloudflare.enabled) {
+                    images = await cloudflare.processImages(images, character, 5);
+                    cloudflareProcessed = true;
+                }
+
+                return json({
+                    success: true,
+                    character,
+                    series: series || null,
+                    page, limit,
+                    totalImages: result.totalImages,
+                    maxPages: result.maxPages,
+                    images,
+                    sources: result.sources,
+                    cached: result.cached,
+                    cloudflare: cloudflareProcessed,
+                    timing: Date.now() - startTime
+                });
+            }
+
+            // Tag discovery
+            if (path === '/api/tags' && request.method === 'GET') {
+                const character = url.searchParams.get('character');
+                const series = url.searchParams.get('series');
+
+                if (!character) {
+                    return json({ error: 'Character name required' }, 400);
+                }
+
+                const tags = await tagDiscovery.discoverTags(character, series);
+                return json({ success: true, tags });
+            }
+
+            // Stats
+            if (path === '/api/stats' && request.method === 'GET') {
+                const cfStats = await cloudflare.getStats();
+                return json({ cache: cache.getStats(), cloudflare: cfStats });
+            }
+
+            // Cloudflare upload
+            if (path === '/api/cloudflare/upload' && request.method === 'POST') {
+                const body = await request.json();
+                const { url: imageUrl, character, source } = body;
+
+                if (!imageUrl) return json({ error: 'Image URL required' }, 400);
+                if (!cloudflare.enabled) return json({ error: 'Cloudflare Images not configured' }, 503);
+
+                const cfUrl = await cloudflare.uploadFromUrl(imageUrl, { character, source });
+                if (cfUrl) {
+                    return json({ success: true, url: cfUrl, original: imageUrl });
+                }
+                return json({ error: 'Failed to upload to Cloudflare' }, 500);
+            }
+
+            // Cloudflare delete
+            if (path.startsWith('/api/cloudflare/image/') && request.method === 'DELETE') {
+                if (!cloudflare.enabled) return json({ error: 'Cloudflare Images not configured' }, 503);
+                const imageId = path.split('/').pop();
+                const success = await cloudflare.deleteImage(imageId);
+                return json({ success });
+            }
+
+            // Clear cache
+            if (path === '/api/cache/clear' && request.method === 'POST') {
+                cache.clear();
+                return json({ success: true, message: 'Cache cleared' });
+            }
+
+            return json({ error: 'Not found' }, 404);
+
+        } catch (error) {
+            console.error('[API Error]', error);
+            return json({ error: error.message }, 500);
+        }
+    }
+};
